@@ -7,7 +7,7 @@ import streamlit as st
 
 st.set_page_config(page_title='تحليل دول الدراسة والتخصصات', page_icon='🎓', layout='wide')
 st.title('🎓 تحليل دول الدراسة والتخصصات')
-st.caption('تحليل تفاعلي لعدد السجلات حسب دولة الدراسة والتخصص، دون حذف التكرار')
+st.caption('تحليل تفاعلي لعدد الموظفين الفريدين حسب دولة الدراسة والتخصص')
 
 COUNTRIES = {
  'الإمارات': ['جامعة عجمان','جامعة المدينة عجمان','جامعة أم القيوين','جامعة الإمارات العربية المتحدة','جامعة زايد','جامعة الشارقة','جامعة خليفة','جامعة أبوظبي','جامعة الغرير','جامعة الإمارات للطيران','كليات التقنية العليا','كلية التقنية العليا','كليات التقنية العيا','كلية الأفق الجامعية','أكاديمية شرطة دبي','الجامعة الأمريكية في الشارقة','الجامعة الأمريكية في الإمارات','جامعة الوصل','كلية الدراسات الاسلامية والعربية','أكاديمية ربدان','جامعة محمد بن زايد للعلوم الإنسانية','جامعة بوليتكنك ابوظبي','كلية المدينة الجامعية بعجمان','جامعة عجمان للعلوم والتكنولوجيا','كلية الدار الجامعية','جامعة الاتحاد','جامعة الجزيرة'],
@@ -39,12 +39,12 @@ ALIASES = {'كليات التقينه العليا':'الإمارات','كليا
 
 def country_for(v):
     n = normalize(v)
-    if not n or n in ('0','-','nan'): return 'غير مذكور'
+    if not n or n in ('0','-','nan'): return ''
     if n in LOOKUP: return LOOKUP[n]
     if n in ALIASES: return ALIASES[n]
     for name, country in sorted(LOOKUP.items(), key=lambda x:len(x[0]), reverse=True):
         if len(name) >= 13 and name in n: return country
-    return 'غير مذكور'
+    return 'يحتاج مراجعة'
 
 def excel_bytes(sheets):
     output = io.BytesIO()
@@ -71,7 +71,7 @@ except Exception as e:
     st.stop()
 
 df.columns = [str(c).strip() for c in df.columns]
-required = ['التخصص']
+required = ['الرقم الوظيفي','التخصص']
 missing = [c for c in required if c not in df.columns]
 if missing:
     st.error('الأعمدة المطلوبة غير موجودة: ' + '، '.join(missing))
@@ -83,13 +83,94 @@ if 'دولة الدراسة' not in df.columns and 'الدولة' not in df.colu
         st.stop()
     pos = df.columns.get_loc('المؤسسة التعليمية') + 1
     df.insert(pos, 'دولة الدراسة', df['المؤسسة التعليمية'].map(country_for))
-    st.info('تم إنشاء عمود دولة الدراسة من المؤسسة التعليمية؛ المؤسسات غير المعروفة أو الفارغة صُنفت «غير مذكور» وتدخل في التحليل.')
+    st.info('تم إنشاء عمود دولة الدراسة من المؤسسة التعليمية؛ راجعي القيم المصنفة «يحتاج مراجعة».')
 elif 'دولة الدراسة' not in df.columns:
     df = df.rename(columns={'الدولة':'دولة الدراسة'})
 
-for col in ['التخصص','دولة الدراسة']:
+for col in ['الرقم الوظيفي','التخصص','دولة الدراسة']:
     df[col] = df[col].astype('string').str.strip()
-    df[col] = df[col].replace({'': 'غير مذكور', 'nan': 'غير مذكور', 'None': 'غير مذكور', '-': 'غير مذكور', '0': 'غير مذكور', 'يحتاج مراجعة': 'غير مذكور'}).fillna('غير مذكور')
+    df[col] = df[col].replace({'':pd.NA, 'nan':pd.NA, 'None':pd.NA, '-':pd.NA})
 
-# الاحتفاظ بكل السجلات، حتى عندما لا تكون الدولة أو التخصص معروفين.
-valid = df.copy()
+valid = df.dropna(subset=['الرقم الوظيفي','التخصص','دولة الدراسة']).copy()
+valid = valid[valid['دولة الدراسة'] != 'يحتاج مراجعة']
+
+st.subheader('الفلاتر')
+filtered = valid.copy()
+filter_cols = ['الدائرة','اسم الجهة التابعة','الجنسية','المستوى التعليمي','درجة المؤهل','دولة الدراسة','التخصص']
+with st.expander('اختاري الفلاتر (تُطبّق على كل الرسوم والجداول)', expanded=True):
+    cols = st.columns(3)
+    for i, col in enumerate(filter_cols):
+        if col not in filtered.columns: continue
+        choices = sorted(valid[col].dropna().astype(str).unique().tolist())
+        with cols[i % 3]:
+            selected = st.multiselect(col, choices, key=f'filter_{col}')
+        if selected:
+            filtered = filtered[filtered[col].astype(str).isin(selected)]
+
+if filtered.empty:
+    st.warning('لا توجد بيانات مطابقة للفلاتر.')
+    st.stop()
+
+# Count each employee once per country/specialization combination.
+# One employee can legitimately appear in multiple combinations.
+groups = (filtered.groupby(['دولة الدراسة','التخصص'], dropna=False)['الرقم الوظيفي']
+          .nunique().reset_index(name='عدد الموظفين الفريدين'))
+country_totals = (filtered.groupby('دولة الدراسة')['الرقم الوظيفي'].nunique()
+                  .reset_index(name='عدد الموظفين الفريدين').sort_values('عدد الموظفين الفريدين',ascending=False))
+specialty_totals = (filtered.groupby('التخصص')['الرقم الوظيفي'].nunique()
+                    .reset_index(name='عدد الموظفين الفريدين').sort_values('عدد الموظفين الفريدين',ascending=False))
+
+c1,c2,c3,c4 = st.columns(4)
+c1.metric('الموظفون الفريدون', filtered['الرقم الوظيفي'].nunique())
+c2.metric('دول الدراسة', filtered['دولة الدراسة'].nunique())
+c3.metric('التخصصات', filtered['التخصص'].nunique())
+c4.metric('الجهات', filtered['اسم الجهة التابعة'].nunique() if 'اسم الجهة التابعة' in filtered else '—')
+
+st.subheader('العلاقة بين دولة الدراسة والتخصص')
+col1,col2,col3 = st.columns(3)
+with col1:
+    top_n = st.selectbox('أكثر التخصصات', [5,10,20,50], index=1)
+with col2:
+    chart_mode = st.radio('شكل الأعمدة', ['متجاورة','متراكمة'], horizontal=True)
+with col3:
+    chart_direction = st.selectbox('محور المقارنة', ['التخصص','دولة الدراسة'])
+
+if chart_direction == 'التخصص':
+    top = specialty_totals.head(top_n)['التخصص']
+    chart_df = groups[groups['التخصص'].isin(top)]
+    fig = px.bar(chart_df, x='التخصص', y='عدد الموظفين الفريدين', color='دولة الدراسة',
+                 barmode='group' if chart_mode=='متجاورة' else 'stack',
+                 title='عدد الموظفين حسب التخصص ودولة الدراسة',
+                 hover_data=['دولة الدراسة'])
+else:
+    top = country_totals.head(top_n)['دولة الدراسة']
+    chart_df = groups[groups['دولة الدراسة'].isin(top)]
+    fig = px.bar(chart_df, x='دولة الدراسة', y='عدد الموظفين الفريدين', color='التخصص',
+                 barmode='group' if chart_mode=='متجاورة' else 'stack',
+                 title='عدد الموظفين حسب دولة الدراسة والتخصص')
+fig.update_layout(xaxis_tickangle=-35, legend_title_text='التصنيف', height=560)
+st.plotly_chart(fig, use_container_width=True)
+st.caption('يُحسب الموظف مرة واحدة داخل كل مجموعة (دولة + تخصص). إذا ظهر في مجموعات متعددة، فلا يجوز جمع الأعمدة لاعتبارها إجمالي الموظفين الفريدين.')
+
+left,right = st.columns(2)
+with left:
+    st.subheader('الموظفون حسب الدولة')
+    st.dataframe(country_totals, use_container_width=True, hide_index=True)
+with right:
+    st.subheader('الموظفون حسب التخصص')
+    st.dataframe(specialty_totals, use_container_width=True, hide_index=True)
+
+st.subheader('جدول العلاقات التفصيلي')
+st.dataframe(groups.sort_values('عدد الموظفين الفريدين',ascending=False), use_container_width=True, hide_index=True)
+
+with st.expander('السجلات التي تحتاج مراجعة'):
+    review = df[df['دولة الدراسة'].isna() | (df['دولة الدراسة']=='يحتاج مراجعة')]
+    st.write(f'عدد السجلات: {len(review):,}')
+    st.dataframe(review, use_container_width=True, hide_index=True)
+
+st.download_button('📥 تنزيل النتائج وملف البيانات (Excel)',
+    data=excel_bytes({'العلاقات':groups,'حسب الدولة':country_totals,
+                      'حسب التخصص':specialty_totals,'البيانات المفلترة':filtered,
+                      'البيانات المحدثة':df}),
+    file_name='تحليل_دول_الدراسة_والتخصصات.xlsx',
+    mime='application/vnd.openxmlformats-officedocument.spreadsheetml.sheet')
